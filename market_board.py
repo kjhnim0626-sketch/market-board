@@ -17,6 +17,7 @@ OUT = BASE / 'index.html'
 CACHE = BASE / 'cache'
 KR_MIN_CAP = 1e11          # 시총 1000억 원 이상만 업종 지수에 넣는다
 KST = dt.timezone(dt.timedelta(hours=9))
+MA_LINES = [(200, 'm200'), (120, 'm120'), (50, 'm50')]   # 차트에 그리는 일 이평선
 MA = {'일': ('D', 50), '주': ('W', 30), '월': ('M', 10)}
 
 # ── 해외 구성: (티커, 이름) ──────────────────────────────────────────────
@@ -212,7 +213,7 @@ def stats(s, bench=None):
         last=s.iloc[-1], date=s.index[-1], day=(s.iloc[-1] / s.iloc[-2] - 1) * 100,
         m1=ret_since(s, months=1), rel3=r3 - ret_since(bench.dropna(), months=3) if bench is not None else np.nan,
         dd52=(s.iloc[-1] / s[s.index > s.index[-1] - pd.Timedelta(weeks=52)].max() - 1) * 100,
-        badges=badges, weekly=resample(s, 'W'))
+        badges=badges, daily=s)
 
 
 # ── 그리기 ──────────────────────────────────────────────────────────────
@@ -223,22 +224,25 @@ def pct(v, digits=0, unit='%'):
     return f'{v:+.{digits}f}{unit}'.replace('+0%', '0%').replace('-0%', '0%').replace('+0p', '0p').replace('-0p', '0p')
 
 
-def spark(weekly):
+def spark(s):
     W, H, L, R, T, B = 300, 112, 6, 246, 12, 88
-    ma = weekly.rolling(30).mean()
-    w, ma = weekly.iloc[-104:], ma.iloc[-104:]
+    w = resample(s, 'W').iloc[-104:]
+    mas = [(cls, resample(s.rolling(n).mean(), 'W').reindex(w.index)) for n, cls in MA_LINES]
     base = w.iloc[0]
-    lo, hi = min(w.min(), ma.min()), max(w.max(), ma.max())
+    vals = pd.concat([w] + [m for _, m in mas])
+    lo, hi = vals.min(), vals.max()
     span = (hi - lo) or 1
     x = lambda i: L + (R - L) * i / (len(w) - 1)
     y = lambda v: B - (B - T) * (v - lo) / span
     line = ' '.join(f'{x(i):.1f},{y(v):.1f}' for i, v in enumerate(w))
-    mline = ' '.join(f'{x(i):.1f},{y(v):.1f}' for i, v in enumerate(ma) if pd.notna(v))
+    mlines = ''.join(f'<polyline class="ma {cls}" points="'
+                     + ' '.join(f'{x(i):.1f},{y(v):.1f}' for i, v in enumerate(m) if pd.notna(v)) + '"/>'
+                     for cls, m in mas)
     end = (w.iloc[-1] / base - 1) * 100
     peak = (w.max() / base - 1) * 100
     ey = min(max(y(w.iloc[-1]) + 4, T + 14), B + 2)
     parts = [f'<svg viewBox="0 0 {W} {H}" class="sp">',
-             f'<polyline class="ma" points="{mline}"/><polyline class="px" points="{line}"/>',
+             f'{mlines}<polyline class="px" points="{line}"/>',
              f'<text x="{R + 4}" y="{ey:.1f}" class="lb end">{pct(end)}</text>']
     if peak - end >= 5:
         parts.append(f'<text x="{W - 2}" y="{T - 2}" class="lb pk" text-anchor="end">{pct(peak)}</text>')
@@ -262,7 +266,7 @@ def card(name, sub, st, kind, tip=''):
             else f'1개월 {pct(st["m1"])} · 3개월 상대 {pct(st["rel3"], unit="%p")}')
     t = f' title="{html.escape(tip)}"' if tip else ''
     return (f'<div class="{cls}"{t}><div class="hd"><b>{html.escape(name)}</b><span class="tk">{html.escape(sub)}</span>'
-            f'<span class="d {day_cls}">{pct(st["day"], 1)}</span></div>{spark(st["weekly"])}'
+            f'<span class="d {day_cls}">{pct(st["day"], 1)}</span></div>{spark(st["daily"])}'
             f'<div class="bd">{badges}</div><div class="ft">{foot}</div></div>')
 
 
@@ -311,7 +315,7 @@ PAGE = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>시장 그룹판</title>
 <style>
 :root{{--bg:#f6f6f4;--card:#fff;--line:#e3e3df;--ink:#1d1d1f;--sub:#86868b;--up:#d6303a;--down:#2563c9;
---ma:#e07b45;--upbg:#fdecec;--downbg:#e8f0fc;--mixbg:#eeeeec;--chg:#d96a2b}}
+--ma:#e8742f;--m120:#2e9e6a;--m200:#8b5cf6;--upbg:#fdecec;--downbg:#e8f0fc;--mixbg:#eeeeec;--chg:#d96a2b}}
 @media (prefers-color-scheme:dark){{:root{{--bg:#151516;--card:#1f1f21;--line:#333336;--ink:#ececec;--sub:#9a9aa0;
 --up:#ff5b62;--down:#5b93ff;--upbg:#3a1f22;--downbg:#1d2a40;--mixbg:#2c2c2f}}}}
 *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);
@@ -332,7 +336,8 @@ h2{{font-size:18px;margin:26px 0 12px}}
 .tk{{color:var(--sub);font-size:12px}}.d{{margin-left:auto;font-weight:700}}
 .up{{color:var(--up)}}.down{{color:var(--down)}}
 .sp{{width:100%;height:auto;display:block;margin:4px 0 2px}}
-.px{{fill:none;stroke:var(--ink);stroke-width:1.4;stroke-linejoin:round}}.ma{{fill:none;stroke:var(--ma);stroke-width:1.3;opacity:.85}}
+.px{{fill:none;stroke:var(--ink);stroke-width:1.4;stroke-linejoin:round}}.ma{{fill:none;stroke-width:1.2;opacity:.9}}.m50{{stroke:var(--ma)}}.m120{{stroke:var(--m120)}}.m200{{stroke:var(--m200)}}
+.c50{{color:var(--ma)}}.c120{{color:var(--m120)}}.c200{{color:var(--m200)}}
 .lb{{font-size:11px;font-weight:700;fill:var(--ink)}}.lb.pk{{font-weight:400;fill:var(--sub)}}
 .ax{{font-size:10px;fill:var(--sub)}}
 .bd{{display:flex;gap:4px}}.b{{font-size:11.5px;padding:1px 5px;border-radius:5px;font-weight:600;border:1.5px solid transparent}}
@@ -341,10 +346,10 @@ h2{{font-size:18px;margin:26px 0 12px}}
 .ft{{text-align:right;color:var(--sub);font-size:12px;margin-top:4px}}
 footer{{text-align:center;color:var(--sub);font-size:12px;padding:20px}}
 </style></head><body>
-<header><h1>시장 그룹판<small>일·주·월 추세 · 2년 주봉 종가와 30주선</small></h1>
+<header><h1>시장 그룹판<small>일·주·월 추세 · 2년 주봉 종가와 50·120·200일선</small></h1>
 <div class="tip">칩: <span class="b up">일▲</span> 이평 위·이평 상승 &nbsp;<span class="b down">주▼</span> 이평 아래·이평 하락
 &nbsp;<span class="b mix">월▲</span> 엇갈림 &nbsp;<span class="b up now">일▲</span> 오늘 바뀜 · 일=50일선, 주=30주선, 월=10개월선.
-업종은 3개월 상대수익률(지수 대비) 순. 지수 카드는 검은 테, 오늘 칩이 바뀐 카드는 주황 테.</div></header>
+선: <b class="c50">━ 50일</b> <b class="c120">━ 120일</b> <b class="c200">━ 200일</b>.<br>업종은 3개월 상대수익률(지수 대비) 순. 지수 카드는 검은 테, 오늘 칩이 바뀐 카드는 주황 테.</div></header>
 <nav>{nav}</nav><main>{body}</main>
 <footer>생성 {now} · 데이터: Yahoo Finance, KRX(FinanceDataReader) · 한국 업종은 시총 1000억 이상 종목, 현재 상장주식수 기준 근사</footer>
 </body></html>'''
